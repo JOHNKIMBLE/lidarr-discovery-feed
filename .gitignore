@@ -1,0 +1,3 @@
+lidarr-discovery.json
+*.log
+__pycache__/
