@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates a Lidarr "Custom List" JSON feed for artist discovery.
 
-Combines three sources into one deduplicated artist list:
+Combines five sources into one deduplicated artist list:
 
   1. A record label's full artist roster, derived from MusicBrainz's release
      catalog for that label. MIN_RELEASES=1 by default so a brand-new signing
@@ -9,11 +9,14 @@ Combines three sources into one deduplicated artist list:
   2. Artists played on a given radio show, scraped from the show's own site
      (tested against RTE 2FM, whose per-episode playlist is server-rendered
      directly in the page HTML -- no browser/JS needed).
-  3. Artists played on a BBC Radio programme, scraped from the official BBC
-     programme pages (bbc.co.uk/programmes/<pid>) -- also server-rendered,
-     no browser needed.
+  3-5. Artists played on a set of BBC Radio programmes, scraped from the
+     official BBC programme pages (bbc.co.uk/programmes/<pid>) -- also
+     server-rendered, no browser needed. Only a handful of episodes are ever
+     listed since BBC's on-demand window is time-limited, which suits an
+     ongoing-discovery feed fine -- there's nothing to catch up on beyond
+     what's currently up.
 
-Sources 2 and 3 give plain artist names, not MusicBrainz IDs, so each name is
+Sources 2-5 give plain artist names, not MusicBrainz IDs, so each name is
 resolved via MusicBrainz's artist search API. Only high-confidence matches
 (score >= 90) are kept; anything softer is logged and skipped rather than
 risking a wrong artist ending up in the list.
@@ -21,8 +24,10 @@ risking a wrong artist ending up in the list.
 Output: a flat JSON array of {"MusicBrainzId": "<mbid>"}, the exact format
 Lidarr's "Custom List" (CustomImport) import type expects as a list URL.
 
-All source identifiers below are configurable via environment variables so
+Most source identifiers below are configurable via environment variables so
 this can be repointed at a different label/show without touching the code.
+BBC_SHOWS is the one exception -- it's a list of (pid, label) pairs rather
+than a single scalar, so it stays a code-level constant.
 """
 import json
 import os
@@ -44,11 +49,16 @@ RTE_STATION = os.environ.get("RTE_STATION", "2fm")
 RTE_SHOW = os.environ.get("RTE_SHOW", "2fm-greene-room-with-jenny-greene")
 RTE_EPISODES_PER_RUN = int(os.environ.get("RTE_EPISODES_PER_RUN", "12"))  # ~2-3 weeks of shows
 
-# --- BBC radio show -----------------------------------------------------------
-BBC_SHOW_PID = os.environ.get("BBC_SHOW_PID", "b00v4tv3")  # Benji B, BBC Radio 1
+# --- BBC radio shows ----------------------------------------------------------
+# (programme pid, label) -- BBC Radio 1's Benji B, Pete Tong, and Sarah Story
+BBC_SHOWS = [
+    ("b00v4tv3", "benji b"),
+    ("b006ww0v", "pete tong"),
+    ("m000zc82", "sarah story"),
+]
 
-OUT_PATH = os.environ.get("OUT_PATH", "./lidarr-discovery.json")
-LOG_PATH = os.environ.get("LOG_PATH", "./generate.log")
+OUT_PATH = os.environ.get("OUT_PATH", "/mnt/cache/docker/discovery-feed/lidarr-discovery.json")
+LOG_PATH = os.environ.get("LOG_PATH", "/mnt/cache/docker/discovery-feed/generate.log")
 
 MB_RETRIES = 3
 MB_RETRY_BACKOFF = 3  # seconds, multiplied by attempt number
@@ -177,21 +187,21 @@ def rte_artist_names():
     return names
 
 
-# ------------------------------------------------------------------ BBC radio show
+# ------------------------------------------------------------------ BBC radio shows
 BBC_ARTIST_RE = re.compile(
     r'segments-list__item--music.*?<span class="artist">(.*?)</span>',
     re.S,
 )
 
 
-def bbc_episode_pids():
-    html = http_get("https://www.bbc.co.uk/programmes/%s/episodes" % BBC_SHOW_PID)
+def bbc_episode_pids(show_pid):
+    html = http_get("https://www.bbc.co.uk/programmes/%s/episodes" % show_pid)
     return sorted(set(re.findall(r"programmes/(m[0-9a-z]{7})", html)))
 
 
-def bbc_artist_names():
+def bbc_artist_names(show_pid, label):
     names = set()
-    pids = bbc_episode_pids()
+    pids = bbc_episode_pids(show_pid)
     for pid in pids:
         html = http_get("https://www.bbc.co.uk/programmes/%s" % pid)
         for artist in BBC_ARTIST_RE.findall(html):
@@ -199,17 +209,26 @@ def bbc_artist_names():
             if artist:
                 names.add(artist)
         time.sleep(0.5)
-    log("bbc show: %d episodes, %d distinct artist names" % (len(pids), len(names)))
+    log("%s: %d episodes, %d distinct artist names" % (label, len(pids), len(names)))
     return names
 
 
 def main():
     label = label_artists()
     rte = resolve_names(rte_artist_names(), "rte show")
-    bbc = resolve_names(bbc_artist_names(), "bbc show")
-    combined = sorted(label | rte | bbc)
-    log("combined total: %d artists (label %d, rte show %d, bbc show %d)"
-        % (len(combined), len(label), len(rte), len(bbc)))
+
+    bbc_resolved = {}
+    for pid, show_label in BBC_SHOWS:
+        bbc_resolved[show_label] = resolve_names(bbc_artist_names(pid, show_label), show_label)
+
+    combined_set = label | rte
+    for mbids in bbc_resolved.values():
+        combined_set |= mbids
+    combined = sorted(combined_set)
+
+    bbc_summary = ", ".join("%s %d" % (show_label, len(mbids)) for show_label, mbids in bbc_resolved.items())
+    log("combined total: %d artists (label %d, rte show %d, %s)"
+        % (len(combined), len(label), len(rte), bbc_summary))
 
     payload = [{"MusicBrainzId": m} for m in combined]
     with open(OUT_PATH, "w") as fh:
