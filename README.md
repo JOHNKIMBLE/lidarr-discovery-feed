@@ -37,7 +37,7 @@ URL.
 
 1. Configure the sources you want via environment variables (see below), or
    just use the defaults.
-2. Run `generate.py` on a schedule (cron, systemd timer, or your NAS/server's
+2. Run `run.sh` on a schedule (cron, systemd timer, or your NAS/server's
    own scheduled-task mechanism) -- once or twice a day is plenty.
 3. Run `serve.sh` to serve the generated JSON, or just drop the JSON file on
    any web server / static file host you already have.
@@ -63,6 +63,7 @@ a different label or show without touching the code:
 | `BBC_SHOW_PID` | Benji B (BBC Radio 1) | BBC programme ID |
 | `OUT_PATH` | `./lidarr-discovery.json` | Where the JSON feed is written |
 | `LOG_PATH` | `./generate.log` | Where run logs are written |
+| `MB_CONTACT` | This repository URL | Contact URL included in the MusicBrainz User-Agent |
 | `PORT` (serve.sh) | `8098` | Port to serve the JSON on |
 
 To find a different BBC programme's PID or an RTE show's slug, just look at
@@ -77,3 +78,6 @@ the URL of that show's page on bbc.co.uk/programmes or rte.ie/radio.
 - MusicBrainz API calls retry a few times before giving up, since a single
   dropped request mid-pagination can otherwise silently under-count a large
   label's roster.
+- `run.sh` uses a non-blocking lock, and the generator atomically replaces the
+  JSON feed only after a fully successful run.  A failed or overlapping run
+  leaves Lidarr's last known-good feed available.

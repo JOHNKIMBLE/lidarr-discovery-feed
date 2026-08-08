@@ -37,7 +37,13 @@ import sys
 import time
 import urllib.parse
 
-UA = "lidarr-discovery-feed/1.0 (personal use; contact via github)"
+# MusicBrainz asks API clients to identify themselves with a version and a
+# usable contact URL or email address.  Override MB_CONTACT if this repository
+# is forked or maintained elsewhere.
+MB_CONTACT = os.environ.get(
+    "MB_CONTACT", "https://github.com/JOHNKIMBLE/lidarr-discovery-feed"
+)
+UA = "lidarr-discovery-feed/1.2 (%s)" % MB_CONTACT
 
 # --- Label roster (MusicBrainz) ---------------------------------------------
 LABEL_MBID = os.environ.get("LABEL_MBID", "dc940013-b8a8-4362-a465-291026c04b42")  # Ninja Tune
@@ -72,11 +78,18 @@ def log(msg):
 
 
 def http_get(url, headers=None):
-    cmd = ["curl", "-sL", "--max-time", "20", "-A", UA]
+    """Fetch text or raise, rather than silently treating an error as empty."""
+    cmd = [
+        "curl", "-fsSL", "--connect-timeout", "10", "--max-time", "30",
+        "-A", UA,
+    ]
     for k, v in (headers or {}).items():
         cmd += ["-H", "%s: %s" % (k, v)]
-    cmd.append(url)
-    return subprocess.run(cmd, capture_output=True, text=True).stdout
+    result = subprocess.run(cmd + [url], capture_output=True, text=True)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().replace("\n", " ")
+        raise RuntimeError("GET failed (exit %d): %s" % (result.returncode, detail[:300]))
+    return result.stdout
 
 
 def mb_get(path):
@@ -87,10 +100,11 @@ def mb_get(path):
     label roster fetch stopping partway through and under-reporting artists).
     """
     for attempt in range(1, MB_RETRIES + 1):
-        raw = http_get("https://musicbrainz.org/ws/2/" + path)
         try:
+            raw = http_get("https://musicbrainz.org/ws/2/" + path)
             return json.loads(raw)
-        except Exception:
+        except (RuntimeError, json.JSONDecodeError) as exc:
+            log("  [musicbrainz] attempt %d/%d failed: %s" % (attempt, MB_RETRIES, exc))
             if attempt < MB_RETRIES:
                 time.sleep(MB_RETRY_BACKOFF * attempt)
     log("  [musicbrainz] giving up after %d attempts: %s" % (MB_RETRIES, path))
@@ -131,7 +145,7 @@ def label_artists():
         d = mb_get("release?label=%s&inc=artist-credits&fmt=json&limit=100&offset=%d"
                    % (LABEL_MBID, offset))
         if not d:
-            break
+            raise RuntimeError("label roster request failed at offset %d" % offset)
         batch = d.get("releases", [])
         releases.extend(batch)
         total = d.get("release-count", 0)
@@ -214,12 +228,20 @@ def bbc_artist_names(show_pid, label):
 
 
 def main():
-    label = label_artists()
-    rte = resolve_names(rte_artist_names(), "rte show")
+    # Do not publish a partial feed: a transient failure must leave Lidarr's
+    # previously good list intact rather than making artists disappear.
+    try:
+        label = label_artists()
+        rte = resolve_names(rte_artist_names(), "rte show")
 
-    bbc_resolved = {}
-    for pid, show_label in BBC_SHOWS:
-        bbc_resolved[show_label] = resolve_names(bbc_artist_names(pid, show_label), show_label)
+        bbc_resolved = {}
+        for pid, show_label in BBC_SHOWS:
+            bbc_resolved[show_label] = resolve_names(
+                bbc_artist_names(pid, show_label), show_label
+            )
+    except Exception as exc:
+        log("ERROR: generation aborted; existing feed retained: %s" % exc)
+        return 1
 
     combined_set = label | rte
     for mbids in bbc_resolved.values():
@@ -230,10 +252,19 @@ def main():
     log("combined total: %d artists (label %d, rte show %d, %s)"
         % (len(combined), len(label), len(rte), bbc_summary))
 
+    if not combined:
+        log("ERROR: generation produced an empty feed; existing feed retained")
+        return 1
+
     payload = [{"MusicBrainzId": m} for m in combined]
-    with open(OUT_PATH, "w") as fh:
+    tmp_path = OUT_PATH + ".tmp"
+    with open(tmp_path, "w") as fh:
         json.dump(payload, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, OUT_PATH)
     log("wrote %s" % OUT_PATH)
+    return 0
 
 
 if __name__ == "__main__":
