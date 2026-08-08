@@ -63,8 +63,9 @@ BBC_SHOWS = [
     ("m000zc82", "sarah story"),
 ]
 
-OUT_PATH = os.environ.get("OUT_PATH", "/mnt/cache/docker/discovery-feed/lidarr-discovery.json")
-LOG_PATH = os.environ.get("LOG_PATH", "/mnt/cache/docker/discovery-feed/generate.log")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_PATH = os.environ.get("OUT_PATH", os.path.join(BASE_DIR, "lidarr-discovery.json"))
+LOG_PATH = os.environ.get("LOG_PATH", os.path.join(BASE_DIR, "generate.log"))
 
 MB_RETRIES = 3
 MB_RETRY_BACKOFF = 3  # seconds, multiplied by attempt number
