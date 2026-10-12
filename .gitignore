@@ -1,3 +1,4 @@
 lidarr-discovery.json
 *.log
 __pycache__/
+.feed/
